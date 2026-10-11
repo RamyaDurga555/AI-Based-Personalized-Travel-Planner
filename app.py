@@ -12,6 +12,13 @@ import requests
 import re
 from urllib.parse import quote
 
+import database
+try:
+    database.init_db()
+    database.seed_demo_account()
+except Exception:
+    pass
+
 from planner import (
     COUNTRIES,
     generate_itinerary,
@@ -177,6 +184,30 @@ st.markdown(
         background: rgba(56, 189, 248, 0.12);
         color: #38bdf8;
         border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 999px;
+        padding: 5px 14px;
+        font-size: 13px;
+        font-weight: 700;
+    }
+    .top-nav-user-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(16, 185, 129, 0.16);
+        color: #34d399;
+        border: 1px solid rgba(16, 185, 129, 0.4);
+        border-radius: 999px;
+        padding: 5px 14px;
+        font-size: 13px;
+        font-weight: 700;
+    }
+    .top-nav-guest-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(148, 163, 184, 0.15);
+        color: #cbd5e1;
+        border: 1px solid rgba(148, 163, 184, 0.3);
         border-radius: 999px;
         padding: 5px 14px;
         font-size: 13px;
@@ -375,6 +406,18 @@ if "destination_country_select" not in st.session_state:
 
 if "saved_places" not in st.session_state:
     st.session_state.saved_places = []
+
+if "is_authenticated" not in st.session_state:
+    st.session_state.is_authenticated = False
+
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+
+if "user_profile" not in st.session_state:
+    st.session_state.user_profile = None
+
+if "auth_tab" not in st.session_state:
+    st.session_state.auth_tab = "login"
 
 if "days" not in st.session_state:
     st.session_state.days = 7
@@ -1395,6 +1438,9 @@ def get_verified_emergency_info(country_name: str) -> dict:
 
 def is_place_saved(name: str, country: str) -> bool:
     """Checks whether a destination or attraction is in saved_places."""
+    if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+        u_id = st.session_state.current_user["id"]
+        return database.is_place_saved_db(u_id, name, country)
     saved = st.session_state.get("saved_places", [])
     return any(p.get("name") == name and p.get("country") == country for p in saved)
 
@@ -1403,6 +1449,13 @@ def toggle_save_place(place_dict: dict) -> bool:
     """Toggles saving a place in st.session_state.saved_places. Returns True if now saved, False if removed."""
     if "saved_places" not in st.session_state:
         st.session_state.saved_places = []
+
+    if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+        u_id = st.session_state.current_user["id"]
+        is_saved = database.toggle_save_place_db(u_id, place_dict)
+        st.session_state.saved_places = database.get_saved_places(u_id)
+        return is_saved
+
     name = place_dict.get("name")
     country = place_dict.get("country")
     existing_idx = next(
@@ -6565,6 +6618,13 @@ def render_country_info_card(column, label, value):
 def render_top_navigation(current_mode):
     dest = st.session_state.get("selected_country", "Japan")
     dest_flag = get_country_flag(dest)
+    is_auth = st.session_state.get("is_authenticated", False)
+    curr_u = st.session_state.get("current_user")
+    if is_auth and curr_u:
+        u_name = html.escape(curr_u.get("display_name", "Traveler"))
+        user_badge_html = f'<span class="top-nav-user-badge">👤 {u_name}</span>'
+    else:
+        user_badge_html = '<span class="top-nav-guest-badge">👤 Guest</span>'
 
     st.markdown(
         f"""
@@ -6573,8 +6633,9 @@ def render_top_navigation(current_mode):
                 <div class="top-nav-brand-title">AI-Based Personalized Travel Planner</div>
                 <div class="top-nav-brand-tagline">Your next adventure starts here.</div>
             </div>
-            <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="top-nav-dest-badge">📍 {html.escape(dest)} {dest_flag}</span>
+                {user_badge_html}
             </div>
         </div>
         """,
@@ -6591,7 +6652,8 @@ def render_top_navigation(current_mode):
         ("companion", "🤖 AI Companion"),
         ("safety", "🛡️ Safety"),
         ("saved", "🔖 Saved Places"),
-        ("summary", "📋 Trip Summary")
+        ("summary", "📋 Trip Summary"),
+        ("profile", "👤 Profile" if is_auth else "🔐 Sign In")
     ]
 
     nav_cols = st.columns(len(pages))
@@ -6659,8 +6721,9 @@ if "chat_history" not in st.session_state or not isinstance(st.session_state.cha
 if st.session_state.get("chat_destination") != destination:
     st.session_state.chat_destination = destination
     c_name = get_assistant_name("companion")
+    u_greeting = f"Hi {st.session_state.current_user['display_name']}! 👋" if st.session_state.get("is_authenticated") and st.session_state.get("current_user") else "Hi! 👋"
     welcome_text = (
-        f"Hi! 👋 I'm **{c_name}**, your personal AI travel companion for **{destination}** {profile['flag']}.\n\n"
+        f"{u_greeting} I'm **{c_name}**, your personal AI travel companion for **{destination}** {profile['flag']}.\n\n"
         f"I have loaded your personalized **{days}-day** trip plan for **{travelers} traveler{'s' if travelers > 1 else ''}**, "
         f"starting from **{starting_location}**, budget of **₹{budget:,}**, and **{interests_str}** preferences.\n\n"
         f"Ask me anything in **any language** about routes, visas, transit options, packing, food, places, or travel tips!"
@@ -6679,7 +6742,9 @@ trip_context = {
     "style": style,
     "itinerary": plan,
     "transport": get_transportation(destination),
-    "tips": get_travel_tips(destination)
+    "tips": get_travel_tips(destination),
+    "user_name": st.session_state.current_user.get("display_name") if st.session_state.get("is_authenticated") and st.session_state.get("current_user") else None,
+    "user_profile": st.session_state.get("user_profile") if st.session_state.get("is_authenticated") else None
 }
 
 
@@ -6748,7 +6813,7 @@ if curr_mode == "landing":
             unsafe_allow_html=True
         )
 
-        btn_c1, btn_c2 = st.columns(2)
+        btn_c1, btn_c2, btn_c3 = st.columns(3)
         with btn_c1:
             if st.button("Plan My Trip", key="landing_cta_plan", type="primary", width="stretch"):
                 st.session_state.app_mode = "plan"
@@ -6756,6 +6821,11 @@ if curr_mode == "landing":
         with btn_c2:
             if st.button("Explore Destinations", key="landing_cta_globe", type="secondary", width="stretch"):
                 st.session_state.app_mode = "explore"
+                st.rerun()
+        with btn_c3:
+            prof_label = "👤 My Profile" if st.session_state.get("is_authenticated") else "🔐 Sign In"
+            if st.button(prof_label, key="landing_cta_profile", type="secondary", width="stretch"):
+                st.session_state.app_mode = "profile"
                 st.rerun()
 
         # Onboarding Assistant Name Customizer
@@ -7410,6 +7480,18 @@ elif curr_mode == "plan":
                     chosen_style,
                     dietary_preferences=chosen_dietary,
                     cultural_preferences=chosen_cultural
+                )
+
+            if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+                u_id = st.session_state.current_user["id"]
+                database.update_user_preferences(
+                    u_id,
+                    starting_location=resolved_start,
+                    days=chosen_days,
+                    travelers=chosen_travelers,
+                    budget=chosen_budget,
+                    style=chosen_style,
+                    interests=chosen_interests
                 )
 
             st.session_state.app_mode = "itinerary"
@@ -8902,6 +8984,55 @@ elif curr_mode == "itinerary":
                         st.success("Your itinerary has been updated!")
                         st.rerun()
 
+    # Persistent Itinerary Storage Section
+    st.write("")
+    with st.container(border=True):
+        st.markdown("### 💾 Save & Access Persistent Itineraries")
+        if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+            c_u = st.session_state.current_user
+            u_id = c_u["id"]
+            saved_itins = database.get_user_itineraries(u_id)
+            s_c1, s_c2 = st.columns([3, 1.2])
+            with s_c1:
+                default_itin_title = f"{days}-Day Journey across {destination}"
+                itin_title_in = st.text_input(
+                    "Custom Itinerary Title:",
+                    value=default_itin_title,
+                    key="itin_save_title_input"
+                )
+            with s_c2:
+                st.write("")
+                st.write("")
+                if st.button("💾 Save to Profile", key="itin_save_to_db_btn", type="primary", width="stretch"):
+                    itin_obj_to_save = plan if plan else {}
+                    new_it_id = database.save_itinerary_db(u_id, itin_obj_to_save, title=itin_title_in)
+                    if new_it_id:
+                        st.success(f"✅ Itinerary saved to your personal profile!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to save itinerary to database.")
+
+            if saved_itins:
+                with st.expander(f"📂 My Saved Itineraries ({len(saved_itins)})", expanded=False):
+                    for it_entry in saved_itins:
+                        it_row1, it_row2 = st.columns([3.5, 1])
+                        with it_row1:
+                            st.markdown(f"**{it_entry['title']}** &bull; {it_entry['destination']} ({it_entry['days_count']} Days &bull; ₹{it_entry['total_cost']:,})")
+                            st.caption(f"Saved: {it_entry['created_at'][:10]}")
+                        with it_row2:
+                            if st.button("📂 Load", key=f"load_itin_inline_{it_entry['id']}", width="stretch"):
+                                st.session_state.itinerary = it_entry["itinerary"]
+                                st.session_state.selected_country = it_entry["destination"]
+                                st.session_state.globe_country = it_entry["destination"]
+                                st.session_state.days = it_entry["days_count"]
+                                st.success(f"Loaded '{it_entry['title']}'!")
+                                st.rerun()
+        else:
+            st.info("💡 **Sign in or register** to save this custom itinerary permanently to your personal profile and trip history!")
+            if st.button("🔐 Sign In / Create Account", key="itin_guest_login_btn", width="stretch"):
+                st.session_state.app_mode = "profile"
+                st.rerun()
+
     st.write("")
     itin_nav1, itin_nav2 = st.columns([1, 2])
     with itin_nav1:
@@ -9311,7 +9442,12 @@ elif curr_mode == "safety":
 elif curr_mode == "saved":
     render_top_navigation("saved")
 
-    saved_items = st.session_state.get("saved_places", [])
+    if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+        u_id = st.session_state.current_user["id"]
+        saved_items = database.get_saved_places(u_id)
+        st.session_state.saved_places = saved_items
+    else:
+        saved_items = st.session_state.get("saved_places", [])
 
     st.markdown(
         f"""
@@ -9325,6 +9461,9 @@ elif curr_mode == "saved":
         """,
         unsafe_allow_html=True
     )
+
+    if not st.session_state.get("is_authenticated"):
+        st.info("💡 **Tip:** You are browsing as a guest. Sign in or create an account in **Profile** to keep your saved places permanently across devices!")
 
     if not saved_items:
         with st.container(border=True):
@@ -9356,6 +9495,8 @@ elif curr_mode == "saved":
             st.markdown(f"**You have {len(saved_items)} saved place{'s' if len(saved_items) > 1 else ''}:**")
         with top_ctrl2:
             if st.button("🗑️ Clear All Saved", key="saved_clear_all_btn", width="stretch"):
+                if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+                    database.clear_saved_places_db(st.session_state.current_user["id"])
                 st.session_state.saved_places = []
                 st.rerun()
 
@@ -9396,8 +9537,19 @@ elif curr_mode == "saved":
                             else:
                                 st.info("Generate your trip plan in Plan My Trip first.")
                     with act_c2:
-                        if st.button("🗑️ Remove", key=f"saved_del_{s_idx}_{abs(hash(s_name)) % 100000}", width="stretch"):
-                            st.session_state.saved_places.pop(s_idx)
+                        s_id = item.get("id")
+                        del_btn_key = f"saved_del_{s_id}_{s_idx}" if s_id is not None else f"saved_del_{s_idx}_{abs(hash(s_name)) % 100000}"
+                        if st.button("🗑️ Remove", key=del_btn_key, width="stretch"):
+                            if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+                                u_id = st.session_state.current_user["id"]
+                                if s_id is not None:
+                                    database.delete_saved_place_by_id(u_id, int(s_id))
+                                else:
+                                    database.delete_saved_place_db(u_id, s_name, s_country)
+                                st.session_state.saved_places = database.get_saved_places(u_id)
+                            else:
+                                if s_idx < len(st.session_state.saved_places):
+                                    st.session_state.saved_places.pop(s_idx)
                             st.rerun()
 
     st.write("")
@@ -9622,6 +9774,33 @@ elif curr_mode == "summary":
                 if len(plan.get("days", [])) > 6:
                     st.caption(f"&bull; ... and {len(plan.get('days', [])) - 6} additional days detailed in the full itinerary.")
 
+    # Traveler Profile & Save to Vault
+    st.write("")
+    with st.container(border=True):
+        sc_v1, sc_v2 = st.columns([3, 1.2])
+        with sc_v1:
+            if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+                c_u = st.session_state.current_user
+                st.markdown(f"**👤 Active Traveler:** {c_u['display_name']} (`{c_u['email']}`)")
+                st.caption(f"Trip parameters: {days} Days across {destination} &bull; Budget ₹{budget:,} &bull; {style} Rhythm")
+            else:
+                st.markdown("**👤 Guest Trip Blueprint**")
+                st.caption("Sign in to your Traveler Profile to save this blueprint and your customized travel preferences permanently.")
+        with sc_v2:
+            st.write("")
+            if st.session_state.get("is_authenticated") and st.session_state.get("current_user"):
+                if st.button("💾 Save Trip to Profile", key="sum_save_to_prof_btn", type="primary", width="stretch"):
+                    u_id = st.session_state.current_user["id"]
+                    itin_data = plan if plan else {}
+                    t_title = f"{days}-Day {destination} Adventure"
+                    s_id = database.save_itinerary_db(u_id, itin_data, title=t_title)
+                    if s_id:
+                        st.success("✅ Saved to your personal profile & travel history!")
+            else:
+                if st.button("🔐 Sign In / Profile", key="sum_go_auth_btn", width="stretch"):
+                    st.session_state.app_mode = "profile"
+                    st.rerun()
+
     # Secondary Navigation
     st.write("")
     sum_sub1, sum_sub2 = st.columns(2)
@@ -9633,3 +9812,407 @@ elif curr_mode == "summary":
         if st.button("🏠 Back to Home", key="sum_go_home", width="stretch"):
             st.session_state.app_mode = "landing"
             st.rerun()
+
+
+# ============================================================
+# PAGE 11: USER PROFILE & AUTHENTICATION PORTAL
+# ============================================================
+
+elif curr_mode in ("profile", "auth"):
+    render_top_navigation("profile")
+
+    is_auth = st.session_state.get("is_authenticated", False)
+    current_u = st.session_state.get("current_user")
+
+    if not is_auth or not current_u:
+        # --- GUEST / AUTHENTICATION PORTAL ---
+        st.markdown(
+            """
+            <div class="page-header-box">
+                <span class="page-badge" style="background: rgba(129, 140, 248, 0.2); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);">
+                    🔐 TRAVELER VAULT &bull; SECURE ACCESS
+                </span>
+                <h1 class="page-title">Traveler Sign In & Registration</h1>
+                <p class="page-subtitle">Sign in to save custom itineraries, store favorite places in the database, and personalize AI travel advice.</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        auth_tab1, auth_tab2, auth_tab3 = st.tabs([
+            "🔐 Sign In",
+            "📝 Create Account",
+            "🚀 Demo Traveler Access"
+        ])
+
+        with auth_tab1:
+            st.markdown("### Log In to Your Traveler Account")
+            st.caption("Enter your email address and password to retrieve your saved itineraries and preferences:")
+
+            with st.form("login_form", clear_on_submit=False):
+                login_email = st.text_input("Email Address:", placeholder="traveler@example.com", key="login_email_input")
+                login_password = st.text_input("Password:", type="password", placeholder="Enter your password", key="login_pass_input")
+                login_submit = st.form_submit_button("Log In", type="primary", width="stretch")
+
+                if login_submit:
+                    if not login_email or not login_password:
+                        st.error("Please enter both email and password.")
+                    else:
+                        ok, msg, user_data = database.authenticate_user(login_email, login_password)
+                        if ok and user_data:
+                            st.session_state.is_authenticated = True
+                            st.session_state.current_user = user_data
+                            # Load profile
+                            st.session_state.user_profile = database.get_user_profile(user_data["id"])
+                            # Load saved places
+                            st.session_state.saved_places = database.get_saved_places(user_data["id"])
+                            # Load preferences
+                            prefs = database.get_user_preferences(user_data["id"])
+                            if prefs.get("starting_location"):
+                                st.session_state.starting_location = prefs["starting_location"]
+                            if prefs.get("days"):
+                                st.session_state.days = prefs["days"]
+                            if prefs.get("budget"):
+                                st.session_state.budget = prefs["budget"]
+                            if prefs.get("travelers"):
+                                st.session_state.travelers = prefs["travelers"]
+                            if prefs.get("style"):
+                                st.session_state.style = prefs["style"]
+                            if prefs.get("interests"):
+                                st.session_state.interests = prefs["interests"]
+                            # Load latest itinerary if present
+                            latest_itin = database.get_latest_user_itinerary(user_data["id"])
+                            if latest_itin and latest_itin.get("itinerary"):
+                                st.session_state.itinerary = latest_itin["itinerary"]
+                                st.session_state.selected_country = latest_itin["destination"]
+                                st.session_state.globe_country = latest_itin["destination"]
+
+                            st.success(f"Welcome back, {user_data['display_name']}!")
+                            st.rerun()
+                        else:
+                            st.error("Invalid email or password.")
+
+        with auth_tab2:
+            st.markdown("### Create a New Traveler Profile")
+            st.caption("Join AI-Based Personalized Travel Planner to store trips and customize your experience:")
+
+            with st.form("signup_form", clear_on_submit=False):
+                reg_name = st.text_input("Display Name / Full Name:", placeholder="e.g. Maya Lin", key="signup_name_input")
+                reg_email = st.text_input("Email Address:", placeholder="e.g. maya@example.com", key="signup_email_input")
+                r_c1, r_c2 = st.columns(2)
+                with r_c1:
+                    reg_pass = st.text_input("Password (min 6 characters):", type="password", key="signup_pass_input")
+                with r_c2:
+                    reg_confirm = st.text_input("Confirm Password:", type="password", key="signup_confirm_input")
+
+                pref_style_opts = ["Relaxed", "Balanced", "Fast-Paced", "Luxury & Comfort", "Backpacker / Budget", "Family-Friendly"]
+                reg_style = st.selectbox("Preferred Travel Rhythm:", pref_style_opts, index=0, key="signup_style_select")
+                reg_budget = st.number_input("Typical Budget per Trip (INR):", min_value=5000, max_value=2000000, value=80000, step=5000, key="signup_budget_input")
+
+                reg_submit = st.form_submit_button("Create Account & Sign In", type="primary", width="stretch")
+
+                if reg_submit:
+                    if not reg_name.strip():
+                        st.error("Display name is required.")
+                    elif not reg_email.strip() or not database.validate_email(reg_email):
+                        st.error("Please enter a valid email address.")
+                    elif not reg_pass or len(reg_pass) < 6:
+                        st.error("Password must be at least 6 characters long.")
+                    elif reg_pass != reg_confirm:
+                        st.error("Passwords do not match. Please re-enter.")
+                    else:
+                        ok, msg, user_data = database.create_user(reg_email, reg_pass, reg_name)
+                        if ok and user_data:
+                            database.update_user_profile(
+                                user_data["id"],
+                                preferred_travel_style=reg_style,
+                                budget_preference=int(reg_budget)
+                            )
+                            database.update_user_preferences(
+                                user_data["id"],
+                                days=7,
+                                travelers=1,
+                                budget=int(reg_budget),
+                                style=reg_style,
+                                interests=["Culture", "Food"]
+                            )
+                            st.session_state.is_authenticated = True
+                            st.session_state.current_user = user_data
+                            st.session_state.user_profile = database.get_user_profile(user_data["id"])
+                            st.session_state.saved_places = []
+                            st.session_state.style = reg_style
+                            st.session_state.budget = int(reg_budget)
+                            st.success("Account created successfully! Welcome aboard.")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+        with auth_tab3:
+            st.markdown("### 🚀 Fast Demo Account Access")
+            st.caption("Experience all database and personalization features instantly using the pre-configured Demo account:")
+
+            with st.container(border=True):
+                st.markdown(
+                    """
+                    **Pre-seeded Demo Traveler Details:**
+                    - **Name:** Alex Rivera (Demo Traveler)
+                    - **Email:** `demo.traveler@example.com`
+                    - **Default Password:** `DemoTraveler2026!`
+                    - **Includes:** Pre-saved places in Japan, India, and France; pre-configured 7-Day Japan Itinerary; saved travel preferences.
+                    """
+                )
+                if st.button("🚀 One-Click Demo Traveler Login", key="one_click_demo_btn", type="primary", width="stretch"):
+                    demo_info = database.seed_demo_account()
+                    ok, msg, user_data = database.authenticate_user(demo_info["email"], demo_info["password"])
+                    if ok and user_data:
+                        st.session_state.is_authenticated = True
+                        st.session_state.current_user = user_data
+                        st.session_state.user_profile = database.get_user_profile(user_data["id"])
+                        st.session_state.saved_places = database.get_saved_places(user_data["id"])
+                        prefs = database.get_user_preferences(user_data["id"])
+                        st.session_state.starting_location = prefs.get("starting_location", "Tokyo")
+                        st.session_state.days = prefs.get("days", 7)
+                        st.session_state.budget = prefs.get("budget", 120000)
+                        st.session_state.travelers = prefs.get("travelers", 2)
+                        st.session_state.style = prefs.get("style", "Balanced")
+                        st.session_state.interests = prefs.get("interests", ["Culture", "Food", "Heritage"])
+                        latest_itin = database.get_latest_user_itinerary(user_data["id"])
+                        if latest_itin and latest_itin.get("itinerary"):
+                            st.session_state.itinerary = latest_itin["itinerary"]
+                            st.session_state.selected_country = latest_itin["destination"]
+                            st.session_state.globe_country = latest_itin["destination"]
+                        st.success("Logged in as Demo Traveler!")
+                        st.rerun()
+
+    else:
+        # --- AUTHENTICATED USER PROFILE ---
+        u_id = current_u["id"]
+        db_user = database.get_user_by_id(u_id)
+        if db_user:
+            current_u = db_user
+            st.session_state.current_user = db_user
+        user_prof = database.get_user_profile(u_id)
+        st.session_state.user_profile = user_prof
+        user_saved_places = database.get_saved_places(u_id)
+        st.session_state.saved_places = user_saved_places
+        user_itineraries = database.get_user_itineraries(u_id)
+        user_history = database.get_trip_history(u_id)
+
+        st.markdown(
+            f"""
+            <div class="page-header-box">
+                <span class="page-badge" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4);">
+                    👤 ACTIVE TRAVELER &bull; {html.escape(current_u.get('display_name', 'Traveler'))}
+                </span>
+                <h1 class="page-title">Personal Traveler Profile & Vault</h1>
+                <p class="page-subtitle">Manage preferences, customize travel parameters, explore saved trips, and review travel history.</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Profile Overview Metrics & Logout
+        prof_top1, prof_top2 = st.columns([3.5, 1.2])
+        with prof_top1:
+            fav_dests = user_prof.get("favourite_destinations", [])
+            fav_str = ", ".join(fav_dests) if fav_dests else "None selected yet"
+            interests_list = user_prof.get("travel_interests", [])
+            interests_str = ", ".join(interests_list) if interests_list else "None selected yet"
+            st.markdown(
+                f"""
+                <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 14px 18px; margin-bottom: 12px;">
+                    <div style="font-size: 18px; font-weight: 800; color: #f8fafc;">{html.escape(current_u.get('display_name', ''))}</div>
+                    <div style="font-size: 13px; color: #38bdf8; margin-top: 2px;">✉️ {html.escape(current_u.get('email', ''))} &bull; Member since: {current_u.get('created_at', '')[:10]}</div>
+                    <div style="font-size: 12.5px; color: #94a3b8; margin-top: 6px;">
+                        Travel Style: <strong>{html.escape(user_prof.get('preferred_travel_style', 'Relaxed'))}</strong> &bull;
+                        Target Budget: <strong>₹{user_prof.get('budget_preference', 80000):,}</strong> &bull;
+                        Language: <strong>{html.escape(user_prof.get('preferred_language', 'English'))}</strong>
+                    </div>
+                    <div style="font-size: 12.5px; color: #cbd5e1; margin-top: 5px;">
+                        🌍 Favourite Destinations: <strong style="color: #f8fafc;">{html.escape(fav_str)}</strong>
+                    </div>
+                    <div style="font-size: 12.5px; color: #cbd5e1; margin-top: 4px;">
+                        ✨ Travel Interests: <strong style="color: #f8fafc;">{html.escape(interests_str)}</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        with prof_top2:
+            st.write("")
+            if st.button("🚪 Log Out", key="prof_logout_btn", type="secondary", width="stretch"):
+                # Safely clear session state
+                st.session_state.is_authenticated = False
+                st.session_state.current_user = None
+                st.session_state.user_profile = None
+                st.session_state.saved_places = []
+                for k in ["ep_name_input", "ep_style_select", "ep_budget_input", "ep_lang_select", "ep_favs_select", "ep_interests_select"]:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.session_state.itinerary = None
+                st.session_state.chat_history = []
+                st.session_state.guide_chat_history = []
+                st.session_state.multi_stop_plan = None
+                st.session_state.days = 7
+                st.session_state.travelers = 1
+                st.session_state.budget = 80000
+                st.session_state.style = "Relaxed"
+                st.session_state.interests = ["Culture", "Food"]
+                st.session_state.app_mode = "landing"
+                st.success("Logged out successfully.")
+                st.rerun()
+
+        # Stats Cards
+        stat_c1, stat_c2, stat_c3, stat_c4 = st.columns(4)
+        with stat_c1:
+            st.metric("🔖 Saved Places", len(user_saved_places))
+        with stat_c2:
+            st.metric("🗺️ Saved Itineraries", len(user_itineraries))
+        with stat_c3:
+            st.metric("📜 Trip History Records", len(user_history))
+        with stat_c4:
+            st.metric("💳 Target Budget", f"₹{user_prof.get('budget_preference', 80000):,}")
+
+        st.write("")
+
+        p_tab1, p_tab2, p_tab3, p_tab4 = st.tabs([
+            "✏️ Edit Profile & Preferences",
+            "🗺️ My Saved Itineraries",
+            "📜 Travel History",
+            "🔖 Saved Places"
+        ])
+
+        with p_tab1:
+            st.markdown("### Update Your Travel Profile")
+            st.caption("Preferences configured here personalize your AI Companion responses, itinerary suggestions, and budgets:")
+
+            with st.form("edit_profile_form", clear_on_submit=False):
+                ep_c1, ep_c2 = st.columns(2)
+                with ep_c1:
+                    edit_name = st.text_input("Display Name:", value=user_prof.get("display_name", ""), key="ep_name_input")
+                    style_opts = ["Relaxed", "Balanced", "Fast-Paced", "Luxury & Comfort", "Backpacker / Budget", "Family-Friendly", "Cultural & Deep-Dive"]
+                    cur_style = user_prof.get("preferred_travel_style", "Relaxed")
+                    s_idx = style_opts.index(cur_style) if cur_style in style_opts else 0
+                    edit_style = st.selectbox("Preferred Travel Style:", style_opts, index=s_idx, key="ep_style_select")
+
+                with ep_c2:
+                    edit_budget = st.number_input(
+                        "Default Trip Budget (INR):",
+                        min_value=5000,
+                        max_value=3000000,
+                        value=int(user_prof.get("budget_preference", 80000)),
+                        step=5000,
+                        key="ep_budget_input"
+                    )
+                    lang_opts = ["English", "Hindi", "Japanese", "French", "Spanish", "German", "Italian", "Auto Detect"]
+                    cur_lang = user_prof.get("preferred_language", "English")
+                    l_idx = lang_opts.index(cur_lang) if cur_lang in lang_opts else 0
+                    edit_lang = st.selectbox("Preferred Language:", lang_opts, index=l_idx, key="ep_lang_select")
+
+                all_countries = list(COUNTRIES.keys())
+                fav_cur = [c for c in user_prof.get("favourite_destinations", []) if c in all_countries]
+                edit_favs = st.multiselect("Favourite Destinations:", all_countries, default=fav_cur, key="ep_favs_select")
+
+                interest_choices = ["Culture", "Food", "Nature", "Heritage", "Shopping", "Adventure", "Nightlife", "Photography", "Relaxation", "Architecture"]
+                cur_ints = [i for i in user_prof.get("travel_interests", ["Culture", "Food"]) if i in interest_choices]
+                edit_interests = st.multiselect("Travel Interests & Passions:", interest_choices, default=cur_ints, key="ep_interests_select")
+
+                ep_save_btn = st.form_submit_button("💾 Save Profile Changes", type="primary", width="stretch")
+
+                if ep_save_btn:
+                    if not edit_name.strip():
+                        st.error("Display name cannot be empty.")
+                    else:
+                        ok, msg = database.update_user_profile(
+                            u_id,
+                            display_name=edit_name.strip(),
+                            preferred_travel_style=edit_style,
+                            budget_preference=int(edit_budget),
+                            favourite_destinations=edit_favs,
+                            travel_interests=edit_interests,
+                            preferred_language=edit_lang
+                        )
+                        database.update_user_preferences(
+                            u_id,
+                            budget=int(edit_budget),
+                            style=edit_style,
+                            interests=edit_interests
+                        )
+                        if ok:
+                            # Refresh in session state
+                            if st.session_state.get("current_user"):
+                                st.session_state.current_user["display_name"] = edit_name.strip()
+                            fresh_prof = database.get_user_profile(u_id)
+                            st.session_state.user_profile = fresh_prof
+                            st.session_state.style = edit_style
+                            st.session_state.budget = int(edit_budget)
+                            st.session_state.interests = edit_interests
+                            st.success("✅ Profile updated successfully!")
+                            st.rerun()
+                        else:
+                            st.error(f"Error updating profile: {msg}")
+
+        with p_tab2:
+            st.markdown(f"### Saved Itineraries ({len(user_itineraries)})")
+            if not user_itineraries:
+                st.info("No itineraries saved yet. Create a trip plan in 'Plan My Trip' and click '💾 Save to My Profile'!")
+            else:
+                for itin_item in user_itineraries:
+                    with st.container(border=True):
+                        it_c1, it_c2, it_c3 = st.columns([3, 1.2, 1.2])
+                        with it_c1:
+                            st.markdown(f"#### {itin_item['title']}")
+                            st.caption(f"📍 {itin_item['destination']} &bull; {itin_item['days_count']} Days &bull; ₹{itin_item['total_cost']:,} &bull; Created: {itin_item['created_at'][:10]}")
+                        with it_c2:
+                            if st.button("📂 Load Plan", key=f"p_load_itin_{itin_item['id']}", type="primary", width="stretch"):
+                                st.session_state.itinerary = itin_item["itinerary"]
+                                st.session_state.selected_country = itin_item["destination"]
+                                st.session_state.globe_country = itin_item["destination"]
+                                st.session_state.days = itin_item["days_count"]
+                                st.session_state.app_mode = "itinerary"
+                                st.rerun()
+                        with it_c3:
+                            if st.button("🗑️ Delete", key=f"p_del_itin_{itin_item['id']}", width="stretch"):
+                                database.delete_itinerary_db(u_id, itin_item["id"])
+                                st.success("Itinerary deleted.")
+                                st.rerun()
+
+        with p_tab3:
+            st.markdown(f"### Recorded Travel History ({len(user_history)})")
+            if not user_history:
+                st.info("No travel history logged yet. When you save itineraries, your travel history is automatically updated!")
+            else:
+                for h_item in user_history:
+                    with st.container(border=True):
+                        h_c1, h_c2 = st.columns([4, 1.2])
+                        with h_c1:
+                            st.markdown(f"**Trip to {h_item['destination']}** ({h_item['days']} Days &bull; {h_item['status'].title()})")
+                            st.caption(f"Estimated Cost: ₹{h_item['total_cost']:,} &bull; Style: {h_item['style']} &bull; Date: {h_item['created_at'][:10]}")
+                        with h_c2:
+                            if st.button("🗑️ Remove", key=f"p_del_hist_{h_item['id']}", width="stretch"):
+                                database.delete_trip_history_entry(u_id, h_item["id"])
+                                st.rerun()
+
+        with p_tab4:
+            st.markdown(f"### Saved Places Quick Access ({len(user_saved_places)})")
+            if not user_saved_places:
+                st.info("You haven't bookmarked any attractions or restaurants yet.")
+            else:
+                for sp_idx, sp in enumerate(user_saved_places):
+                    sp_id = sp.get("id")
+                    sp_c1, sp_c2 = st.columns([4, 1.2])
+                    with sp_c1:
+                        st.markdown(f"- **{sp.get('name')}** ({sp.get('country')}) — *{sp.get('category', 'Place')}*")
+                    with sp_c2:
+                        sp_del_key = f"p_del_sp_{sp_id}_{sp_idx}" if sp_id is not None else f"p_del_sp_idx_{sp_idx}"
+                        if st.button("🗑️ Remove", key=sp_del_key, width="stretch"):
+                            if sp_id is not None:
+                                database.delete_saved_place_by_id(u_id, int(sp_id))
+                            else:
+                                database.delete_saved_place_db(u_id, sp.get("name", ""), sp.get("country", ""))
+                            st.session_state.saved_places = database.get_saved_places(u_id)
+                            st.rerun()
+                st.write("")
+                if st.button("View Full Saved Places Page →", key="p_go_saved_btn", width="stretch"):
+                    st.session_state.app_mode = "saved"
+                    st.rerun()
